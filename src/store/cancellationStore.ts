@@ -11,10 +11,17 @@ import { generateDeterministicVariant } from "@/lib/abTestingUtils";
 interface CancellationStore {
   currentStep: number;
   steps: any[];
-  downsellVariant?: string;
+  downsellVariant: "A" | "B";
   errors: Record<string, string | undefined>;
   isLoading: boolean;
   savedData: any;
+
+  // Core business fields stored centrally
+  gotJob: "yes" | "no" | null;
+  cancelReason: string | null;
+  companyVisaSupport: "yes" | "no" | null;
+  acceptedDownsell: boolean;
+  finalDecision: "cancelled" | "kept" | null;
 
   // Navigation methods
   goToStep: (stepNumber: number) => void;
@@ -25,10 +32,17 @@ interface CancellationStore {
   setAnswer: (stepId: string, questionId: string, answer: any) => void;
   setError: (questionId: string, error: string | undefined) => void;
   clearErrors: () => void;
-  setDownsellVariant: (variant: string) => void;
-  getCurrentVariant: () => string;
+  setDownsellVariant: (variant: "A" | "B") => void;
+  getCurrentVariant: () => "A" | "B";
 
-  // Data persistence - save only on final step
+  // Core field setters
+  setGotJob: (value: "yes" | "no") => void;
+  setCancelReason: (value: string) => void;
+  setCompanyVisaSupport: (value: "yes" | "no") => void;
+  setAcceptedDownsell: (value: boolean) => void;
+  setFinalDecision: (value: "cancelled" | "kept") => void;
+
+  // Data persistence - save only on final step completion
   saveFlowData: (userId: string, subscriptionId: string) => Promise<boolean>;
   loadFlowData: (userId: string, subscriptionId?: string) => Promise<boolean>;
   getFlowData: () => any;
@@ -41,7 +55,10 @@ interface CancellationStore {
   handleGotJobBranch: (gotJobAnswer: "yes" | "no") => void;
 
   // A/B Testing and flow reset
-  initializeFlow: (userId: string, downsellVariant?: string) => Promise<void>;
+  initializeFlow: (
+    userId: string,
+    downsellVariant?: "A" | "B"
+  ) => Promise<void>;
   resetFlow: () => void;
 }
 
@@ -49,10 +66,17 @@ export const useCancellationStore = create<CancellationStore>()(
   devtools((set, get) => ({
     currentStep: 1,
     steps: cancellationFlowConfig,
-    downsellVariant: "",
+    downsellVariant: "A",
     errors: {},
     isLoading: false,
     savedData: null,
+
+    // Core business fields stored centrally
+    gotJob: null,
+    cancelReason: null,
+    companyVisaSupport: null,
+    acceptedDownsell: false,
+    finalDecision: null,
 
     goToStep: (stepNumber: number) => {
       set({ currentStep: stepNumber });
@@ -93,7 +117,17 @@ export const useCancellationStore = create<CancellationStore>()(
           return state;
         }
 
+        // Update core business fields in store when relevant questions are answered
+        let coreFieldUpdates = {};
+        if (questionId === "cancelReason") {
+          coreFieldUpdates = { cancelReason: answer };
+        } else if (questionId === "companyVisaSupport") {
+          coreFieldUpdates = { companyVisaSupport: answer };
+        }
+
         return {
+          ...state,
+          ...coreFieldUpdates,
           steps: state.steps.map((step, index) =>
             index === stepIndex
               ? {
@@ -136,6 +170,23 @@ export const useCancellationStore = create<CancellationStore>()(
       return get().downsellVariant;
     },
 
+    // Core field setters
+    setGotJob: (value: "yes" | "no") => {
+      set({ gotJob: value });
+    },
+    setCancelReason: (value: string) => {
+      set({ cancelReason: value });
+    },
+    setCompanyVisaSupport: (value: "yes" | "no") => {
+      set({ companyVisaSupport: value });
+    },
+    setAcceptedDownsell: (value: boolean) => {
+      set({ acceptedDownsell: value });
+    },
+    setFinalDecision: (value: "cancelled" | "kept") => {
+      set({ finalDecision: value });
+    },
+
     // Save flow data only on final step completion
     saveFlowData: async (userId: string, subscriptionId: string) => {
       set({ isLoading: true });
@@ -154,16 +205,24 @@ export const useCancellationStore = create<CancellationStore>()(
 
         console.log(`Saving flow data with variant: ${state.downsellVariant}`);
 
-        // Extract core business fields from flow data
+        // Extract flow data for JSONB storage
         const flowData = CancellationService.extractFlowData(
           state.steps,
           state.downsellVariant
         );
-        const coreFields = CancellationService.extractCoreFields(flowData);
+
+        // Use core business fields directly from store state
+        const coreFields = {
+          gotJob: state.gotJob,
+          cancelReason: state.cancelReason,
+          companyVisaSupport: state.companyVisaSupport,
+          acceptedDownsell: state.acceptedDownsell,
+          finalDecision: state.finalDecision,
+        };
 
         // Determine final decision based on flow
         let finalDecision: "cancelled" | "kept" = "cancelled";
-        if (flowData.acceptedDownsell || flowData.finalDecision === "kept") {
+        if (state.acceptedDownsell || state.finalDecision === "kept") {
           finalDecision = "kept";
         }
 
@@ -217,6 +276,12 @@ export const useCancellationStore = create<CancellationStore>()(
               currentStep: cancellationData.current_step || 1,
               savedData: cancellationData,
               downsellVariant: variant, // Use the existing variant
+              // Restore core business fields from database
+              gotJob: cancellationData.got_job || null,
+              cancelReason: cancellationData.cancel_reason || null,
+              companyVisaSupport: cancellationData.company_visa_support || null,
+              acceptedDownsell: cancellationData.accepted_downsell || false,
+              finalDecision: cancellationData.final_decision || null,
             });
 
             // Restore answers from flow_data
@@ -287,6 +352,7 @@ export const useCancellationStore = create<CancellationStore>()(
 
       // Check if there are conditional branches that override the default nextStepId
       for (const branch of currentStep.conditionalBranches) {
+        debugger;
         const { condition, nextStepId } = branch;
 
         // Find the step that contains the condition question
@@ -312,6 +378,9 @@ export const useCancellationStore = create<CancellationStore>()(
     // Handle got-job branching based on variant
     handleGotJobBranch: (gotJobAnswer: "yes" | "no") => {
       const { downsellVariant, steps } = get();
+
+      // Store the gotJob answer in the central store
+      set({ gotJob: gotJobAnswer });
 
       if (gotJobAnswer === "yes") {
         // Go to job-source step
@@ -344,7 +413,7 @@ export const useCancellationStore = create<CancellationStore>()(
     // A/B Testing and flow reset
     // IMPORTANT: Once a variant is set for a user, it should NEVER be updated
     // Variants are only generated for new users with no cancellation records
-    initializeFlow: async (userId: string, downsellVariant?: string) => {
+    initializeFlow: async (userId: string, downsellVariant?: "A" | "B") => {
       // Try to load existing variant from database first
       try {
         const result = await CancellationService.getCancellation(userId);
@@ -378,6 +447,12 @@ export const useCancellationStore = create<CancellationStore>()(
         currentStep: 1,
         errors: {},
         savedData: null,
+        // Reset core business fields
+        gotJob: null,
+        cancelReason: null,
+        companyVisaSupport: null,
+        acceptedDownsell: false,
+        finalDecision: null,
       });
 
       // Save the newly assigned variant to database
@@ -410,6 +485,12 @@ export const useCancellationStore = create<CancellationStore>()(
         currentStep: 1,
         savedData: null,
         errors: {},
+        // Reset core business fields
+        gotJob: null,
+        cancelReason: null,
+        companyVisaSupport: null,
+        acceptedDownsell: false,
+        finalDecision: null,
       });
     },
   }))
